@@ -3,6 +3,8 @@ kind: Kustomization
 namespace: product-profile
 resources:
   - ../base
+components:
+  - ../../image/at22
 
 patches:
   - patch: |-
