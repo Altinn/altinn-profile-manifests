@@ -1,0 +1,51 @@
+name: Publish
+run-name: Publish ${{ github.sha }}
+
+# Publishes the artifacts for every commit on main that changes the config, and moves the AT22 and
+# AT23 tags onto them. Those two deploy automatically. YT01, TT02 and PROD only change when
+# someone runs dispatch-deploy.yml.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'manifests/**'
+      - 'flux/**'
+      - '.github/workflows/ci-cd-publish.yml'
+      - '.github/workflows/workflow-publish-artifacts.yml'
+      - '.github/workflows/workflow-promote.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/workflow-publish-artifacts.yml
+    with:
+      sha: ${{ github.sha }}
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
+
+  promote:
+    name: Deploy to ${{ matrix.environment }}
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [at22, at23]
+    uses: ./.github/workflows/workflow-promote.yml
+    with:
+      environment: ${{ matrix.environment }}
+      tag: ${{ needs.publish.outputs.short_sha }}
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit

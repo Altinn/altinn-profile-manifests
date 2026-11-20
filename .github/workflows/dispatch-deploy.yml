@@ -1,0 +1,279 @@
+name: Deploy
+run-name: Deploy ${{ inputs.image_tag || inputs.commit || 'main' }} to ${{ inputs.environment }}
+
+# Manual deploy to an environment. Always run it from main ("Use workflow from": main).
+#
+#   image_tag   A new app version: pins it for the environment with a commit on main, publishes the
+#               artifacts for that commit and moves the environment tag, in one run.
+#   commit      An earlier commit on main, as it is (a rollback). Nothing is committed.
+#   (neither)   The tip of main as it is, for config changes that need no new app version.
+#
+# AT22 and AT23 also follow every merge to main through ci-cd-publish.yml. This is the way to YT01,
+# TT02 and PROD, and to put a specific build on any environment.
+#
+# TT02 and PROD only take releases (X.Y.Z) and hotfix builds (hotfix-...). A release only goes to
+# PROD if TT02 is pinned to it. Both pass an approval gate before anything is committed: a job in
+# the GitHub environment of the same name, where required reviewers can be added. The gate never
+# logs in to Azure.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy to.
+        type: choice
+        required: true
+        options:
+          - at22
+          - at23
+          - yt01
+          - tt02
+          - prod
+      image_tag:
+        description: New app version, for example 1.4.0 or hotfix-fix-x-abc1234. Leave empty to deploy a commit.
+        type: string
+        required: false
+      commit:
+        description: Earlier commit on main to deploy as it is, as a sha. Empty means the tip of main. Not with image_tag.
+        type: string
+        required: false
+
+permissions: {}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.resolve.outputs.mode }}
+      short_sha: ${{ steps.plan.outputs.short_sha }}
+      image_tag: ${{ steps.plan.outputs.image_tag }}
+    steps:
+      - name: Resolve what to deploy
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          INPUT_TAG: ${{ inputs.image_tag }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+          WORKFLOW_REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [ "${WORKFLOW_REF}" = refs/heads/main ] \
+            || fail "Run this workflow from main (it is '${WORKFLOW_REF}')."
+
+          case "${ENVIRONMENT}" in
+            at22|at23|yt01|tt02|prod) ;;
+            *) fail "Unknown environment '${ENVIRONMENT}'." ;;
+          esac
+
+          [ -z "${INPUT_TAG}" ] || [ -z "${INPUT_COMMIT}" ] \
+            || fail "Set either 'image_tag' (a new app version) or 'commit' (an earlier commit), not both."
+
+          sha=""
+          if [ -n "${INPUT_TAG}" ]; then
+            mode=tag
+          else
+            mode=commit
+            if [ -z "${INPUT_COMMIT}" ]; then
+              sha="$(gh api "repos/${REPO}/commits/main" --jq .sha)"
+            else
+              [[ "${INPUT_COMMIT}" =~ ^[0-9a-fA-F]{7,40}$ ]] \
+                || fail "'commit' must be a commit sha of at least 7 characters."
+              sha="$(gh api "repos/${REPO}/commits/${INPUT_COMMIT}" --jq .sha)" \
+                || fail "'${INPUT_COMMIT}' is not a commit in ${REPO}."
+              # Only commits on main: that is what is reviewed.
+              status="$(gh api "repos/${REPO}/compare/main...${sha}" --jq .status)"
+              case "${status}" in
+                identical|behind) ;;
+                *) fail "${sha:0:7} is not on main." ;;
+              esac
+            fi
+          fi
+
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      # A shallow checkout, like the publish job has, so the short sha is abbreviated the same
+      # way as the artifact tags. For a new app version it is the tip of main.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.resolve.outputs.sha || 'main' }}
+          persist-credentials: false
+
+      - name: Check what would be deployed
+        id: plan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          MODE: ${{ steps.resolve.outputs.mode }}
+          INPUT_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -uo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          if [ "${MODE}" = tag ]; then
+            image_tag="${INPUT_TAG}"
+            short_sha=""
+          else
+            image_tag="$(yq '.images[0].newTag' "manifests/image/${ENVIRONMENT}/kustomization.yaml")"
+            short_sha="$(git rev-parse --short HEAD)"
+          fi
+
+          [[ "${image_tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
+            || fail "'${image_tag}' is not a valid image tag."
+
+          # TT02 and PROD are production: only releases and hotfix builds, no plain branch builds.
+          case "${ENVIRONMENT}" in
+            tt02|prod)
+              if [[ ! "${image_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ ! "${image_tag}" =~ ^hotfix-.+ ]]; then
+                fail "${ENVIRONMENT} only takes releases (X.Y.Z) and hotfix builds (hotfix-...), not '${image_tag}'."
+              fi
+              ;;
+          esac
+
+          # A release only goes to PROD if TT02 is pinned to it. A hotfix build is exempt, and so
+          # is a rollback to an earlier commit.
+          if [ "${MODE}" = tag ] && [ "${ENVIRONMENT}" = prod ] && [[ "${image_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tt02_tag="$(yq '.images[0].newTag' manifests/image/tt02/kustomization.yaml)"
+            [ "${tt02_tag}" = "${image_tag}" ] \
+              || fail "PROD only takes a release that TT02 is pinned to. TT02 is on '${tt02_tag}', not '${image_tag}'. Deploy it to TT02 first."
+          fi
+
+          scripts/image-exists.sh "${image_tag}"
+          case $? in
+            0) ;;
+            1) fail "ghcr.io/altinn/altinn-profile:${image_tag} does not exist." ;;
+            *) exit 1 ;;
+          esac
+
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Plan: ${ENVIRONMENT}"
+            echo "- App image \`${image_tag}\`"
+            if [ "${MODE}" = tag ]; then
+              echo "- Pinned with a new commit on main, then published and deployed"
+            else
+              echo "- Commit \`${short_sha}\`, as it is"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Approval gates. These jobs do nothing but run in the GitHub environment of the same name, so
+  # required reviewers on TT02 and PROD hold the deploy until someone approves.
+  gate-tt02:
+    name: Approve TT02 deploy
+    needs: plan
+    if: inputs.environment == 'tt02'
+    runs-on: ubuntu-latest
+    environment: TT02
+    permissions: {}
+    steps:
+      - run: echo "Approved for TT02"
+
+  gate-prod:
+    name: Approve PROD deploy
+    needs: plan
+    if: inputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    environment: PROD
+    permissions: {}
+    steps:
+      - run: echo "Approved for PROD"
+
+  # A new app version is pinned with a commit on main, so git keeps the history of what each
+  # environment was moved to, and by whom.
+  bump:
+    name: Pin ${{ inputs.image_tag }} for ${{ inputs.environment }}
+    needs: [plan, gate-tt02, gate-prod]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'tag' && contains(fromJSON('["success","skipped"]'), needs.gate-tt02.result) && contains(fromJSON('["success","skipped"]'), needs.gate-prod.result) }}
+    runs-on: ubuntu-latest
+    # Everything that pushes to main takes turns.
+    concurrency:
+      group: main-writes
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.update.outputs.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Pin the tag and push
+        id: update
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
+          RUN_BY: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          file="manifests/image/${ENVIRONMENT}/kustomization.yaml"
+          [ -f "${file}" ] || { echo "::error::${file} not found"; exit 1; }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Re-derive the edit from the current tip on every attempt: a run that loses the race
+          # just applies its tag on top of the winner, so concurrent pushes never conflict.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin +refs/heads/main:refs/remotes/origin/main
+            git reset --hard refs/remotes/origin/main
+
+            yq -i '.images[0].newTag = strenv(IMAGE_TAG)' "${file}"
+
+            if git diff --quiet; then
+              echo "${ENVIRONMENT} is already pinned to ${IMAGE_TAG}."
+              echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            git commit -q -am "chore: deploy ${IMAGE_TAG} to ${ENVIRONMENT}" -m "Run by ${RUN_BY}: ${RUN_URL}"
+
+            echo "Push attempt ${attempt}..."
+            if git push origin HEAD:refs/heads/main; then
+              echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Push rejected, another run pushed first. Trying again on the new tip..."
+            sleep $((attempt * 2))
+          done
+
+          echo "::error::Could not push after 5 attempts"
+          exit 1
+
+  # The commit above is pushed with GITHUB_TOKEN, which does not start ci-cd-publish.yml, so the
+  # artifacts for it are published here.
+  publish:
+    name: Publish
+    needs: bump
+    uses: ./.github/workflows/workflow-publish-artifacts.yml
+    with:
+      sha: ${{ needs.bump.outputs.sha }}
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
+
+  deploy:
+    name: Deploy
+    needs: [plan, gate-tt02, gate-prod, bump, publish]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.gate-tt02.result) && contains(fromJSON('["success","skipped"]'), needs.gate-prod.result) && contains(fromJSON('["success","skipped"]'), needs.bump.result) && contains(fromJSON('["success","skipped"]'), needs.publish.result) }}
+    uses: ./.github/workflows/workflow-promote.yml
+    with:
+      environment: ${{ inputs.environment }}
+      tag: ${{ needs.plan.outputs.mode == 'tag' && needs.publish.outputs.short_sha || needs.plan.outputs.short_sha }}
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
