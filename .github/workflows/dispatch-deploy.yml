@@ -206,6 +206,8 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # The push below uses the credential that checkout stores, so it has to stay.
+          persist-credentials: true
 
       - name: Pin the tag and push
         id: update
@@ -263,7 +265,10 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    secrets: inherit
+    secrets:
+      DIS_SYNCROOT_AZURE_CLIENT_ID: ${{ secrets.DIS_SYNCROOT_AZURE_CLIENT_ID }}
+      DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID: ${{ secrets.DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID }}
+      DIS_SYNCROOT_AZURE_TENANT_ID: ${{ secrets.DIS_SYNCROOT_AZURE_TENANT_ID }}
 
   deploy:
     name: Deploy
@@ -276,4 +281,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    secrets: inherit
+    secrets:
+      DIS_SYNCROOT_AZURE_CLIENT_ID: ${{ secrets.DIS_SYNCROOT_AZURE_CLIENT_ID }}
+      DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID: ${{ secrets.DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID }}
+      DIS_SYNCROOT_AZURE_TENANT_ID: ${{ secrets.DIS_SYNCROOT_AZURE_TENANT_ID }}

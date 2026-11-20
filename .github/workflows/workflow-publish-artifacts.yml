@@ -9,6 +9,13 @@ on:
         description: Commit on main to publish.
         type: string
         required: true
+    secrets:
+      DIS_SYNCROOT_AZURE_CLIENT_ID:
+        required: true
+      DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID:
+        required: true
+      DIS_SYNCROOT_AZURE_TENANT_ID:
+        required: true
     outputs:
       short_sha:
         description: The short sha the artifacts are tagged with.

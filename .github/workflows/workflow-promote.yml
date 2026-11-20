@@ -15,6 +15,13 @@ on:
         description: Short commit sha of the artifacts to deploy, as pushed by ci-cd-publish.yml.
         type: string
         required: true
+    secrets:
+      DIS_SYNCROOT_AZURE_CLIENT_ID:
+        required: true
+      DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID:
+        required: true
+      DIS_SYNCROOT_AZURE_TENANT_ID:
+        required: true
 
 env:
   ACR_NAME: altinncr

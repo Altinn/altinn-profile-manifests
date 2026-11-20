@@ -42,6 +42,8 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # The push below uses the credential that checkout stores, so it has to stay.
+          persist-credentials: true
 
       - name: Validate inputs
         env:
