@@ -1,0 +1,130 @@
+name: Bump image tag
+run-name: Bump ${{ github.event.client_payload.environments || github.event.client_payload.environment }} to ${{ github.event.client_payload.image_tag }}
+
+# Changes the app image tag of AT22 and AT23 with a single commit on main,
+# and starts ci-cd-publish.yml. The altinn-profile repo calls this when it has built an image:
+#
+#   gh api repos/Altinn/altinn-profile-manifests/dispatches \
+#     -f event_type=update_image_tag \
+#     -f 'client_payload[environments]=at22,at23' -f 'client_payload[image_tag]=main-abc1234'
+#
+# `environments` is a comma separated list of the environments to bump. A single `environment`
+# also works.
+#
+# To put a build on one environment by hand, run Deploy with image_tag instead. YT01, TT02 and PROD
+# are not bumped from here: they are deployed with Deploy (TT02 and PROD behind approval gates).
+# Publish only moves the at22 and at23 tags, so a bump of any other environment would pin it
+# without ever deploying it.
+#
+# Needs a token for the dispatch that can write to this repo, and a ruleset on main that lets the
+# GitHub Actions bot push if main requires pull requests.
+on:
+  repository_dispatch:
+    types: [update_image_tag]
+
+permissions: {}
+
+jobs:
+  bump:
+    name: Bump ${{ github.event.client_payload.environments || github.event.client_payload.environment }}
+    runs-on: ubuntu-latest
+    # Everything that pushes to main takes turns.
+    concurrency:
+      group: main-writes
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      # Track the live branch: a run that waited in the queue must not build on a stale tip.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          # The push below uses the credential that checkout stores, so it has to stay.
+          persist-credentials: true
+
+      - name: Validate inputs
+        env:
+          # Via env, not interpolated into the script, so crafted input can't inject commands.
+          ENVIRONMENTS: ${{ github.event.client_payload.environments || github.event.client_payload.environment }}
+          IMAGE_TAG: ${{ github.event.client_payload.image_tag }}
+        run: |
+          set -uo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [ -n "${ENVIRONMENTS}" ] || fail "No environment given."
+          IFS=',' read -r -a envs <<<"${ENVIRONMENTS}"
+          for env in "${envs[@]}"; do
+            case "${env}" in
+              at22|at23) ;;
+              yt01|tt02|prod) fail "${env} is not bumped from a dispatch. Run Deploy with image_tag." ;;
+              *) fail "Unknown environment '${env}'." ;;
+            esac
+          done
+
+          [[ "${IMAGE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
+            || fail "'${IMAGE_TAG}' is not a valid image tag."
+
+          scripts/image-exists.sh "${IMAGE_TAG}"
+          case $? in
+            0) ;;
+            1) fail "ghcr.io/altinn/altinn-profile:${IMAGE_TAG} does not exist. Was the image built?" ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Update the tags and push
+        id: update
+        env:
+          ENVIRONMENTS: ${{ github.event.client_payload.environments || github.event.client_payload.environment }}
+          IMAGE_TAG: ${{ github.event.client_payload.image_tag }}
+        run: |
+          set -euo pipefail
+
+          IFS=',' read -r -a envs <<<"${ENVIRONMENTS}"
+          for env in "${envs[@]}"; do
+            [ -f "manifests/image/${env}/kustomization.yaml" ] || { echo "::error::manifests/image/${env}/kustomization.yaml not found"; exit 1; }
+          done
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Re-derive the edit from the current tip on every attempt: a run that loses the race
+          # just applies its tag on top of the winner, so concurrent pushes never conflict.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin +refs/heads/main:refs/remotes/origin/main
+            git reset --hard refs/remotes/origin/main
+
+            for env in "${envs[@]}"; do
+              yq -i '.images[0].newTag = strenv(IMAGE_TAG)' "manifests/image/${env}/kustomization.yaml"
+            done
+
+            if git diff --quiet; then
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              echo "${ENVIRONMENTS} already at ${IMAGE_TAG}, nothing to do."
+              exit 0
+            fi
+
+            git commit -am "chore: bump ${ENVIRONMENTS} image tag to ${IMAGE_TAG}"
+
+            echo "Push attempt ${attempt}..."
+            if git push origin HEAD:refs/heads/main; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Push rejected, another run pushed first. Trying again on the new tip..."
+            sleep $((attempt * 2))
+          done
+
+          echo "::error::Could not push after 5 attempts"
+          exit 1
+
+      # The commit above is pushed with GITHUB_TOKEN, which does not start the push-triggered
+      # Publish workflow. workflow_dispatch is exempt from that rule.
+      - name: Start publish
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci-cd-publish.yml --ref main
