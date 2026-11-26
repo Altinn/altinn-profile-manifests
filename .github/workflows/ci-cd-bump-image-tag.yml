@@ -16,8 +16,9 @@ run-name: Bump ${{ github.event.client_payload.environments || github.event.clie
 # Publish only moves the at22 and at23 tags, so a bump of any other environment would pin it
 # without ever deploying it.
 #
-# Needs a token for the dispatch that can write to this repo, and a ruleset on main that lets the
-# GitHub Actions bot push if main requires pull requests.
+# Needs a token for the dispatch that can write to this repo. The commit is pushed with the
+# workflow's own token, so main must not require pull requests until a GitHub App can bypass the
+# ruleset (Altinn/altinn-platform#4493).
 on:
   repository_dispatch:
     types: [update_image_tag]

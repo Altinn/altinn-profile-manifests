@@ -64,4 +64,4 @@ The file name starts with how the workflow is started:
 - The `DIS_SYNCROOT_AZURE_*` secrets, created by the platform team.
 - GitHub environments `TT02` and `PROD`, with required reviewers if the gates should wait for someone.
 - A token in the app repo that may dispatch events to this repo.
-- If `main` requires pull requests: a ruleset that lets the GitHub Actions bot push, for **Deploy** and **Bump image tag**.
+- `main` must not require pull requests for now. **Deploy** and **Bump image tag** push their pin commits straight to `main` with the workflow's own token, which can't be added to a ruleset bypass list. Requiring pull requests needs a GitHub App that can bypass the ruleset (requested in Altinn/altinn-platform#4493).
