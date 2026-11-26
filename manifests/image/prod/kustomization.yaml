@@ -1,0 +1,8 @@
+# The app image tag prod runs, for both pre-deploy (migration job) and deploy.
+# AT22 and AT23 are updated by ci-cd-bump-image-tag.yml. YT01, TT02 and PROD are updated by dispatch-deploy.yml.
+# TT02 and PROD only take releases (X.Y.Z) and hotfix builds (hotfix-...), after approval.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+images:
+  - name: altinncr.azurecr.io/ghcr.io/altinn/altinn-profile
+    newTag: "1.0.1"

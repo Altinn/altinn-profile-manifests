@@ -1,0 +1,84 @@
+name: Publish artifacts (reusable)
+
+# Validates a commit on main and pushes its manifests and syncroot artifacts to the registry,
+# tagged with the short sha. It moves no environment tag: ci-cd-publish.yml and dispatch-deploy.yml do that.
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: Commit on main to publish.
+        type: string
+        required: true
+    secrets:
+      DIS_SYNCROOT_AZURE_CLIENT_ID:
+        required: true
+      DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID:
+        required: true
+      DIS_SYNCROOT_AZURE_TENANT_ID:
+        required: true
+    outputs:
+      short_sha:
+        description: The short sha the artifacts are tagged with.
+        value: ${{ jobs.publish.outputs.short_sha }}
+
+permissions: {}
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/workflow-validate.yml
+    with:
+      ref: ${{ inputs.sha }}
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish artifacts
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      short_sha: ${{ steps.sha.outputs.short_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+
+      # build-push-image tags the artifact with `git rev-parse --short HEAD` of this checkout, so
+      # the short sha is taken here, the same way, and used for every later step and workflow.
+      - name: Short sha
+        id: sha
+        run: echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Push manifests artifact
+        uses: Altinn/altinn-platform/actions/flux/build-push-image@523f141da4f116fdd7331585396d83a5d7ade7ea # main
+        with:
+          image_name: profile/manifests
+          workdir: ./manifests
+          azure_subscription_id: ${{ secrets.DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID }}
+          azure_app_id: ${{ secrets.DIS_SYNCROOT_AZURE_CLIENT_ID }}
+          azure_tenant_id: ${{ secrets.DIS_SYNCROOT_AZURE_TENANT_ID }}
+
+      # After the manifests, so a syncroot never points at a manifests artifact that doesn't exist yet.
+      - name: Push syncroot artifact
+        uses: Altinn/altinn-platform/actions/flux/build-push-image@523f141da4f116fdd7331585396d83a5d7ade7ea # main
+        with:
+          image_name: profile/syncroot
+          workdir: ./flux/syncroot
+          azure_subscription_id: ${{ secrets.DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID }}
+          azure_app_id: ${{ secrets.DIS_SYNCROOT_AZURE_CLIENT_ID }}
+          azure_tenant_id: ${{ secrets.DIS_SYNCROOT_AZURE_TENANT_ID }}
+
+      - name: Summary
+        env:
+          SHORT_SHA: ${{ steps.sha.outputs.short_sha }}
+        run: |
+          {
+            echo "### Published ${SHORT_SHA}"
+            echo "- \`profile/manifests:${SHORT_SHA}\`"
+            echo "- \`profile/syncroot:${SHORT_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

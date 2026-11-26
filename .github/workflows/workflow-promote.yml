@@ -1,0 +1,99 @@
+name: Promote (reusable)
+
+# Deploys an environment by moving its tag onto artifacts that already exist: the manifests and
+# syncroot artifacts that ci-cd-publish.yml pushed for a commit, tagged with the short sha. Nothing is
+# built here. The environment tag is what the cluster's Flux follows.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment to deploy to (at22, at23, yt01, tt02, prod).
+        type: string
+        required: true
+      tag:
+        description: Short commit sha of the artifacts to deploy, as pushed by ci-cd-publish.yml.
+        type: string
+        required: true
+    secrets:
+      DIS_SYNCROOT_AZURE_CLIENT_ID:
+        required: true
+      DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID:
+        required: true
+      DIS_SYNCROOT_AZURE_TENANT_ID:
+        required: true
+
+env:
+  ACR_NAME: altinncr
+  ENVIRONMENT: ${{ inputs.environment }}
+  MANIFESTS_ARTIFACT_NAME: profile/manifests
+  SYNCROOT_ARTIFACT_NAME: profile/syncroot
+
+permissions: {}
+
+concurrency:
+  # One deploy per environment at a time. A newer queued run replaces an older queued one.
+  group: promote-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Deploy ${{ inputs.tag }} to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate inputs
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "${ENVIRONMENT}" in
+            at22|at23|yt01|tt02|prod) ;;
+            *) echo "::error::Unknown environment '${ENVIRONMENT}'."; exit 1 ;;
+          esac
+          [[ "${TAG}" =~ ^[0-9a-f]{7,40}$ ]] \
+            || { echo "::error::'${TAG}' is not a commit sha"; exit 1; }
+
+      - name: Move the environment tag onto the manifests
+        uses: Altinn/altinn-platform/actions/flux/retag-image@523f141da4f116fdd7331585396d83a5d7ade7ea # main
+        with:
+          image_name: ${{ env.MANIFESTS_ARTIFACT_NAME }}
+          from_tag: ${{ inputs.tag }}
+          tag: ${{ env.ENVIRONMENT }}
+          workdir: ./manifests
+          acr_name: ${{ env.ACR_NAME }}
+          azure_subscription_id: ${{ secrets.DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID }}
+          azure_app_id: ${{ secrets.DIS_SYNCROOT_AZURE_CLIENT_ID }}
+          azure_tenant_id: ${{ secrets.DIS_SYNCROOT_AZURE_TENANT_ID }}
+
+      # After the manifests, so the OCIRepository never points at an artifact that doesn't exist yet.
+      - name: Move the environment tag onto the syncroot
+        uses: Altinn/altinn-platform/actions/flux/retag-image@523f141da4f116fdd7331585396d83a5d7ade7ea # main
+        with:
+          image_name: ${{ env.SYNCROOT_ARTIFACT_NAME }}
+          from_tag: ${{ inputs.tag }}
+          tag: ${{ env.ENVIRONMENT }}
+          workdir: ./flux/syncroot
+          acr_name: ${{ env.ACR_NAME }}
+          azure_subscription_id: ${{ secrets.DIS_SYNCROOT_AZURE_SUBSCRIPTION_ID }}
+          azure_app_id: ${{ secrets.DIS_SYNCROOT_AZURE_CLIENT_ID }}
+          azure_tenant_id: ${{ secrets.DIS_SYNCROOT_AZURE_TENANT_ID }}
+
+      - name: Hint on failure
+        if: failure()
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          echo "::error::If the artifacts for ${TAG} were not found: only commits that ci-cd-publish.yml has pushed can be deployed. Check that the Publish run for that commit succeeded."
+
+      - name: Summary
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          {
+            echo "### Deployed ${TAG} to ${ENVIRONMENT}"
+            echo "The \`${ENVIRONMENT}\` tag now points at the manifests and syncroot artifacts of commit \`${TAG}\`."
+            echo "Flux picks it up within 10 minutes, or with \`flux reconcile source oci manifests -n product-profile\`."
+          } >> "$GITHUB_STEP_SUMMARY"
