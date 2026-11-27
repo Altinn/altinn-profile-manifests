@@ -4,6 +4,8 @@ run-name: Publish ${{ github.sha }}
 # Publishes the artifacts for every commit on main that changes the config, and moves the AT22 and
 # AT23 tags onto them. Those two deploy automatically. YT01, TT02 and PROD only change when
 # someone runs dispatch-deploy.yml.
+#
+# A manual run can move just one of the two tags. A push always moves both.
 on:
   push:
     branches:
@@ -15,6 +17,15 @@ on:
       - '.github/workflows/workflow-publish-artifacts.yml'
       - '.github/workflows/workflow-promote.yml'
   workflow_dispatch:
+    inputs:
+      environments:
+        description: Environments to move onto this commit.
+        type: choice
+        options:
+          - both
+          - at22
+          - at23
+        default: both
 
 permissions: {}
 
@@ -43,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [at22, at23]
+        environment: ${{ fromJSON(inputs.environments == 'at22' && '["at22"]' || inputs.environments == 'at23' && '["at23"]' || '["at22","at23"]') }}
     uses: ./.github/workflows/workflow-promote.yml
     with:
       environment: ${{ matrix.environment }}
