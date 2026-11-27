@@ -128,4 +128,13 @@ jobs:
         if: steps.update.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run ci-cd-publish.yml --ref main
+          ENVIRONMENTS: ${{ github.event.client_payload.environments || github.event.client_payload.environment }}
+        run: |
+          set -euo pipefail
+          # Only the bumped environments are moved. Both is Publish's default, so no input is passed.
+          publish_envs="$(tr ',' '\n' <<<"${ENVIRONMENTS}" | sort -u | paste -sd, -)"
+          if [ "${publish_envs}" = "at22,at23" ]; then
+            gh workflow run ci-cd-publish.yml --ref main
+          else
+            gh workflow run ci-cd-publish.yml --ref main -f "environments=${publish_envs}"
+          fi
